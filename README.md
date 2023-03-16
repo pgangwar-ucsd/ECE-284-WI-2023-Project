@@ -1,7 +1,7 @@
 # ECE-284-WI-2023-Project
 
 Steps to run:
-1. git clone https://github.com/pgangwar-ucsd/usher.git
+1. git clone https://github.com/pgangwar-ucsd/ECE-284-WI-2023-Project.git
 2. cd usher
 3. rm -rf build
 4. ./install/installUbuntu.sh
