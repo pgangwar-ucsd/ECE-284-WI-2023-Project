@@ -19,7 +19,7 @@ NOTE: run.sh can be edited to generate different results by the following switch
 -r 150 : read_len of 150
 -w 20 : using 20 samples from a clade
 -s 2 : sequencing depth of 2
--T * : currenty not mentioned in run.sh. Including this value allows us to run the code on specified number of cores 
+-T * : currenty not mentioned in run.sh. Including this value allows us to run the code on specified number of cores. Else runs on all cores of machine 
 
 
 
