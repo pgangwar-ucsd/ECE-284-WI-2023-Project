@@ -947,7 +947,7 @@ void simulate_and_place_reads (po::parsed_options parsed) {
     fprintf(stderr,"Reads_VCF parsed in %ld msec\n\n", timer.Stop());
 
     place_reads_nodes_sequential(traversal, read_ids, vcf_filename_reads);
-    place_reads_nodes_parallel(T.root, read_ids, vcf_filename_reads);
+    //place_reads_nodes_parallel(T.root, read_ids, vcf_filename_reads);
 }
 
 
