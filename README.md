@@ -1,4 +1,4 @@
-## Note: Might need a supercomputer cluster to run this code as it requires close to 210 GB memory. This is the reason placement of reads could not complete on AWS (tried on t3.micro, t2.small).
+## Note: Might need a supercomputer cluster to run this code as it requires more than 300 GB memory. This is the reason placement of reads could not complete on AWS (tried on t3.micro, t2.small).
 
 Steps to run:
 1. git clone https://github.com/pgangwar-ucsd/ECE-284-WI-2023-Project.git
