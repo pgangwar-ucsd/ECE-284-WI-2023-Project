@@ -946,20 +946,26 @@ void simulate_and_place_reads (po::parsed_options parsed) {
     read_vcf(vcf_filename_reads, read_ids);
     fprintf(stderr,"Reads_VCF parsed in %ld msec\n\n", timer.Stop());
 
-    tbb::concurrent_hash_map<size_t, struct min_parsimony> read_min_parsimony;
-    place_reads(traversal, read_ids, read_min_parsimony, vcf_filename_reads);
+    //place_reads_nodes_sequential(traversal, read_ids, vcf_filename_reads);
+    place_reads_nodes_parallel(T.root, read_ids, vcf_filename_reads);
 }
 
 
-void place_reads(const std::vector<MAT::Node*> &dfs, const std::vector<struct read_info*> &read_ids, tbb::concurrent_hash_map<size_t, struct min_parsimony> &read_min_parsimony, std::string vcf_filename_reads) {
+void place_reads_nodes_sequential(const std::vector<MAT::Node*> &dfs, const std::vector<struct read_info*> &read_ids, std::string vcf_filename_reads) {
     fprintf(stderr, "Total nodes: %ld, Reads: %ld\n\n", dfs.size(), read_ids.size());
     timer.Start();
+
+    //tbb::concurrent_hash_map<size_t, struct min_parsimony> read_min_parsimony;
+    std::unordered_map<size_t, struct min_parsimony> read_min_parsimony;
+    struct min_parsimony ins;
+    for (size_t i = 0; i < read_ids.size(); i++)
+        read_min_parsimony.insert({i, ins});
 
     static tbb::affinity_partitioner ap;
     tbb::parallel_for( tbb::blocked_range<size_t>(0, read_ids.size()),
         [&](tbb::blocked_range<size_t> k) {
             for (size_t r = k.begin(); r < k.end(); ++r) {
-	    	auto rp = read_ids[r];
+	    	    auto rp = read_ids[r];
                 std::stack<struct parsimony> parsimony_stack;
                 struct min_parsimony min_par;
                 while (!parsimony_stack.empty())
@@ -1115,10 +1121,11 @@ void place_reads(const std::vector<MAT::Node*> &dfs, const std::vector<struct re
                     parsimony_stack.push(curr_par);
                 }
 
-                tbb::concurrent_hash_map<size_t, struct min_parsimony>::accessor ac;
-                read_min_parsimony.insert(ac, r);
-                ac->second = min_par;
-                ac.release();
+                //tbb::concurrent_hash_map<size_t, struct min_parsimony>::accessor ac;
+                //read_min_parsimony.insert(ac, r);
+                //ac->second = min_par;
+                //ac.release();
+                read_min_parsimony[r] = min_par;
                 
                 //if (min_par.par_list.size() <= 1000)
                 //    printf("Read: %s, Parsimony score = %ld, parsimonious positions: %ld\n", rp->read.c_str(), read_min_parsimony[r].par_list[0].size(), read_min_parsimony[r].par_list.size());
@@ -1128,7 +1135,7 @@ void place_reads(const std::vector<MAT::Node*> &dfs, const std::vector<struct re
         ap);
 
     
-    fprintf(stderr,"Reads placed in %ld sec\n\n", (timer.Stop() / 1000));
+    fprintf(stderr,"Reads(Serial Search) placed in %ld sec\n\n", (timer.Stop() / 1000));
     
     //Check to ensure every read has its corresponding sample as its most parsimonious position
     unsigned long long avg = 0;
@@ -1138,10 +1145,11 @@ void place_reads(const std::vector<MAT::Node*> &dfs, const std::vector<struct re
         [&](tbb::blocked_range<size_t> k) {
             for (size_t r = k.begin(); r < k.end(); ++r) {
                 auto rp = read_ids[r];
-                tbb::concurrent_hash_map<size_t, struct min_parsimony>::const_accessor k_ac;
-                read_min_parsimony.find(k_ac, r);
-                auto min_par = k_ac->second;
-                k_ac.release();
+                //tbb::concurrent_hash_map<size_t, struct min_parsimony>::const_accessor k_ac;
+                //read_min_parsimony.find(k_ac, r);
+                //auto min_par = k_ac->second;
+                //k_ac.release();
+                auto min_par = read_min_parsimony[r];
                 std::string target = rp->read;
                 size_t pos = target.find("_READ");
                 target.erase(pos);
@@ -1177,9 +1185,244 @@ void place_reads(const std::vector<MAT::Node*> &dfs, const std::vector<struct re
         },
             ap);
 
-    fprintf(stderr, "Avg par pos: %lld\n", avg); 
+    fprintf(stderr, "Avg(Serial Search) par pos: %lld\n", avg);
+    for (size_t i = 0; i < read_ids.size(); i++)
+        read_min_parsimony[i] = ins;
+    read_min_parsimony.clear(); 
 }
 
+
+void place_reads_nodes_parallel(MAT::Node* root, const std::vector<struct read_info*> &read_ids, std::string vcf_filename_reads) {
+    timer.Start();
+    
+    using my_mutex_t = tbb::queuing_mutex;
+    my_mutex_t my_mutex;
+    static tbb::affinity_partitioner ap;
+    tbb::concurrent_hash_map<size_t, struct min_parsimony_parallel> read_min_parsimony;
+
+    tbb::parallel_for( tbb::blocked_range<size_t>(0, read_ids.size()),
+        [&](tbb::blocked_range<size_t> k) {
+            for (size_t r = k.begin(); r < k.end(); ++r) {
+	    	    auto rp = read_ids[r];
+                //struct parsimony parent_par;
+                struct min_parsimony_parallel min_par;
+                min_par.node_list.clear();
+                min_par.par_list.clear();
+                min_par.is_sibling_list.clear();
+                
+                std::vector<struct node_parsimony> Tree;
+                struct node_parsimony root_par;
+                root_par.node = root;
+                Tree.emplace_back(root_par);
+                tbb::parallel_do (Tree,
+                [&] (struct node_parsimony n_par,
+                tbb::parallel_do_feeder<struct node_parsimony>& feeder) {
+                    std::vector<MAT::Mutation> uniq_curr_node_mut, common_node_mut, curr_node_par_mut;
+                    struct parsimony curr_par;
+                    if (!(n_par.node->is_root()))
+                        curr_node_par_mut = n_par.parent_par.p_node_par;
+                    
+                    for (auto node_mut: n_par.node->mutations) {
+                        //Only look at mutations within the read range
+                        if ((node_mut.position >= rp->start) && (node_mut.position <= rp->end)) {
+                            bool found = false;
+
+                            //Check in Mutation position found in parsimony of parent node
+                            for (auto par_node_mut: curr_node_par_mut) {
+                                if (par_node_mut.position == node_mut.position) {
+                                    //mut_nuc matches => remove mutation from parsimony
+                                    if(par_node_mut.mut_nuc == node_mut.mut_nuc) {
+                                       auto itr = curr_node_par_mut.begin();
+                                       while (!((itr->position == par_node_mut.position) && (itr->mut_nuc == par_node_mut.mut_nuc) && (itr->ref_nuc == par_node_mut.ref_nuc))) {
+                                            itr++; 
+                                       }
+                                       common_node_mut.emplace_back(par_node_mut);
+                                       curr_node_par_mut.erase(itr);
+                                       //Did not work because == not defined for MAT::Mutation
+                                       //curr_node_par_mut.erase(std::remove(curr_node_par_mut.begin(), curr_node_par_mut.end(), par_node_mut), curr_node_par_mut.end());
+                                    }
+                                    //Update the par_nuc in parsimony if found
+                                    else {
+                                        par_node_mut.par_nuc = node_mut.mut_nuc;    
+                                    }
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (found)
+                                continue;
+
+                            //Not found in parent parsimony
+                            for (auto read_mut: rp->mutations) {
+                                if (read_mut.position == node_mut.position) {
+                                    //Mutation found in read, add to common_node_mut
+                                    if (read_mut.mut_nuc == node_mut.mut_nuc)
+                                        common_node_mut.emplace_back(read_mut);
+                                    else {
+                                        struct MAT::Mutation new_mut;
+                                        new_mut.position = read_mut.position;
+                                        new_mut.ref_nuc = read_mut.ref_nuc;
+                                        new_mut.par_nuc = node_mut.mut_nuc;
+                                        new_mut.mut_nuc = read_mut.mut_nuc;
+                                        curr_node_par_mut.emplace_back(new_mut);
+                                        //Placing it in common_mut so don't add this mut again
+                                        common_node_mut.emplace_back(new_mut);
+                                    }
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (found)
+                                continue;
+
+                            //Niether in parent parsimony nor in read_mut
+                            uniq_curr_node_mut.emplace_back(node_mut);
+                        }
+                    } 
+                    
+                    //Adding only unseen read_mut to node parsimony for root node
+                    if (n_par.node->is_root()) {
+                        for (auto read_mut: rp->mutations) {
+                            bool present = false;
+                            //Check if mut present in common_node_mut
+                            auto itr = common_node_mut.begin();
+                            while (itr != common_node_mut.end()) {
+                                if (itr->position == read_mut.position) {
+                                    if (itr->mut_nuc != read_mut.mut_nuc)
+                                        std::cout << "common_node mut does not match read_mut!!!" << "\n";
+                                    present = true;
+                                    break;
+                                }
+                                itr++;
+                            }
+                            if (present)
+                                continue;
+
+                            //Else add it to curr_node_mut
+                            curr_node_par_mut.emplace_back(read_mut);
+                        }
+                    }
+                    
+                    //Checking min_parsimony
+                    int new_min_par = -1; 
+
+                    my_mutex_t::scoped_lock my_lock;
+                    my_lock.acquire(my_mutex);
+                        if (!(min_par.par_list.size()))
+                            new_min_par = 1;
+                        else if (curr_node_par_mut.size() < min_par.par_list[0].size())
+                            new_min_par = 1;
+                        else if (curr_node_par_mut.size() == min_par.par_list[0].size())
+                            new_min_par = 0;
+                    
+                        if (new_min_par == 1) {
+                            min_par.node_list.clear();
+                            min_par.par_list.clear();
+                            min_par.is_sibling_list.clear();
+                            min_par.node_list.emplace_back(n_par.node);
+                            min_par.par_list.emplace_back(curr_node_par_mut);
+                            if (uniq_curr_node_mut.size())
+                                min_par.is_sibling_list.emplace_back(true);
+                            else
+                                min_par.is_sibling_list.emplace_back(false);
+                        }
+                        else if (new_min_par == 0) {
+                            min_par.node_list.emplace_back(n_par.node);
+                            min_par.par_list.emplace_back(curr_node_par_mut);
+                            if (uniq_curr_node_mut.size())
+                                min_par.is_sibling_list.emplace_back(true);
+                            else
+                                min_par.is_sibling_list.emplace_back(false);
+                        }
+                    my_lock.release();
+
+                    //Updating parsimony to be stored a a child
+                    for (auto uniq_mut: uniq_curr_node_mut) {
+                        //Just reverse mut_nuc and par_nuc and add it to parsimony
+                        int8_t temp = uniq_mut.par_nuc;
+                        uniq_mut.par_nuc = uniq_mut.mut_nuc;
+                        uniq_mut.mut_nuc = temp;
+                        curr_node_par_mut.emplace_back(uniq_mut);
+                    }
+                    
+                    //Updating curr_node_mut for having read as child
+                    curr_par.p_node_par = curr_node_par_mut;
+                    curr_par.curr_node = n_par.node;
+                    
+                    for (auto c: n_par.node->children) {
+                        struct node_parsimony c_par;
+                        c_par.node = c;
+                        c_par.parent_par = curr_par;
+                        feeder.add(c_par);
+                    }
+                }
+                );
+                
+                tbb::concurrent_hash_map<size_t, struct min_parsimony_parallel>::accessor ac;
+                read_min_parsimony.insert(ac, r);
+                ac->second = min_par;
+                ac.release();
+
+                //if (min_par.par_list.size() <= 1000)
+                //    printf("Read: %s, Parsimony score = %ld, parsimonious positions: %ld\n", rp->read.c_str(), read_min_parsimony[r].par_list[0].size(), read_min_parsimony[r].par_list.size());
+            	
+            }
+        },
+        ap);
+
+    
+    fprintf(stderr,"Reads(Parallel Search) placed in %ld sec\n\n", (timer.Stop() / 1000));
+    
+    //Check to ensure every read has its corresponding sample as its most parsimonious position
+    unsigned long long avg = 0;
+    tbb::parallel_for( tbb::blocked_range<size_t>(0, read_ids.size()),
+        [&](tbb::blocked_range<size_t> k) {
+            for (size_t r = k.begin(); r < k.end(); ++r) {
+                auto rp = read_ids[r];
+                tbb::concurrent_hash_map<size_t, struct min_parsimony_parallel>::const_accessor k_ac;
+                read_min_parsimony.find(k_ac, r);
+                auto min_par = k_ac->second;
+                k_ac.release();
+                std::string target = rp->read;
+                size_t pos = target.find("_READ");
+                target.erase(pos);
+                bool found = false;
+                MAT::Node* n_p;
+                size_t count = 0;
+                for (auto node: min_par.node_list) {
+                    if (node->identifier == target) {
+                        found = true;
+                        n_p = node;
+                        break;
+                    }
+                    count++;
+                }
+
+                if ((!found) || (min_par.par_list[0].size())) {
+                    if (found) {
+                        for (auto mut: min_par.par_list[count])
+                            fprintf(stderr, "Parsimony Pos: %d, mut: %c \n", mut.position, MAT::get_nuc(mut.mut_nuc));
+                        fprintf(stderr, "Sample: %s \n", n_p->identifier.c_str());
+                        for (auto mut: rp->mutations)
+                            fprintf(stderr, "Read mut Pos: %d, mut: %c \n", mut.position, MAT::get_nuc(mut.mut_nuc));
+                    }
+                    else {
+                        fprintf(stderr, "Sample not Found !!! \n");
+                        fprintf(stderr, "Target: %s\n", target.c_str());
+                    }
+                    fprintf(stderr, "Read: %s, mutations: %ld, Parsimony score = %ld, parsimonious positions: %ld\n", rp->read.c_str(), rp->mutations.size(), min_par.par_list[0].size(), min_par.par_list.size());
+                    std::cout << "\n"; 
+                }
+
+                my_mutex_t::scoped_lock my_lock{my_mutex};
+                    avg += (min_par.node_list.size() / read_ids.size());
+            }
+        },
+            ap);
+
+    fprintf(stderr, "Avg par pos (Parallel Search) : %lld\n", avg);
+
+}
 
 
 void read_vcf(std::string vcf_filename_reads, std::vector<struct read_info*> &read_ids) {

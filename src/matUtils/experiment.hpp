@@ -50,8 +50,20 @@ struct min_parsimony {
    std::vector<bool> is_sibling_list;
 };
 
+struct min_parsimony_parallel {
+   std::vector<MAT::Node*> node_list;
+   std::vector<std::vector<MAT::Mutation>> par_list;
+   std::vector<bool> is_sibling_list;
+};
+
+struct node_parsimony {
+   MAT::Node* node;
+   struct parsimony parent_par; 
+};
+
 po::variables_map parse_extract_command(po::parsed_options parsed);
 void simulate_and_place_reads(po::parsed_options parsed);
 
 void read_vcf(std::string, std::vector<struct read_info*> &);
-void place_reads(const std::vector<MAT::Node*> &, const std::vector<struct read_info*> &, tbb::concurrent_hash_map<size_t, struct min_parsimony> &, std::string);
+void place_reads_nodes_sequential(const std::vector<MAT::Node*> &, const std::vector<struct read_info*> &, std::string);
+void place_reads_nodes_parallel(MAT::Node*, const std::vector<struct read_info*> &, std::string);
